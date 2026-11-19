@@ -9,23 +9,10 @@ const PORT = process.env.PORT || 8000;
 
 /* ---------- MongoDB ---------- */
 const client = new MongoClient(process.env.MONGODB_URI);
-
-let booksCollection;
-let borrowCollection;
-
-async function connectToMongoDB() {
-  try {
-    await client.connect();
-    const db = client.db("yourlibrary");
-    booksCollection = db.collection("books");
-    borrowCollection = db.collection("borrows");
-    console.log("You successfully connected to MongoDB!");
-  } catch (err) {
-    console.dir(err);
-  }
-}
-
-await connectToMongoDB();
+await client.connect();
+const db = client.db("yourlibrary");
+const books = db.collection("books");
+const borrows = db.collection("borrows");
 
 /* ---------- Middleware ---------- */
 app.use(cors());
@@ -36,227 +23,144 @@ const JWKS = createRemoteJWKSet(
 );
 
 const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).send({ msg: "Unauthorized!" });
-  }
-
-  const token = authHeader.split(" ")[1];
-  if (!token) {
-    return res.status(401).send({ msg: "Unauthorized!" });
-  }
-
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).send({ message: "লগইন করা নেই" });
   try {
     const { payload } = await jwtVerify(token, JWKS);
-    req.user = payload; // pore dorkar hole use kora jabe
+    req.user = payload;
     next();
   } catch (error) {
-    return res.status(401).send({ msg: "Invalid or expired token!" });
+    console.error("JWT error:", error.message);
+    res.status(401).send({ message: "আবার লগইন করো" });
   }
 };
 
-const isValidId = (id) => ObjectId.isValid(id);
+// সব রুটের এরর এক জায়গায় সামলায়
+const wrap = (fn) => (req, res) =>
+  fn(req, res).catch((e) => {
+    console.error(e);
+    res.status(500).send({ message: "সার্ভারে সমস্যা হয়েছে" });
+  });
+
+const oid = (id) => (ObjectId.isValid(id) ? new ObjectId(id) : null);
 
 /* ---------- Books ---------- */
+app.get("/books", wrap(async (req, res) => {
+  const { category } = req.query;
+  const filter = category && category !== "All" ? { category } : {};
+  res.send(await books.find(filter).sort({ createdAt: -1 }).toArray());
+}));
 
-// Notun book add
-app.post("/add-book", verifyToken, async (req, res) => {
-  try {
-    const data = req.body;
-    if (!data.title || !data.author) {
-      return res.status(400).send({ msg: "Title and author are required" });
-    }
-    const book = {
-      ...data,
-      quantity: Number(data.quantity) || 1,
-      createdAt: new Date(),
-    };
-    const result = await booksCollection.insertOne(book);
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
+app.get("/featured-books", wrap(async (req, res) => {
+  res.send(await books.find().sort({ createdAt: -1 }).limit(6).toArray());
+}));
+
+app.get("/books/:id", wrap(async (req, res) => {
+  const _id = oid(req.params.id);
+  const book = _id && (await books.findOne({ _id }));
+  if (!book) return res.status(404).send({ message: "বইটি পাওয়া যায়নি" });
+  res.send(book);
+}));
+
+app.post("/books", verifyToken, wrap(async (req, res) => {
+  const d = req.body;
+  const totalCopies = Number(d.totalCopies) || 1;
+  const result = await books.insertOne({
+    title: d.title,
+    author: d.author,
+    category: d.category,
+    image: d.image,
+    description: d.description,
+    totalCopies,
+    availableCopies: totalCopies,
+    userName: d.userName,
+    userEmail: req.user.email,
+    createdAt: new Date(),
+  });
+  res.send(result);
+}));
+
+app.patch("/books/:id", verifyToken, wrap(async (req, res) => {
+  const _id = oid(req.params.id);
+  const book = _id && (await books.findOne({ _id }));
+  if (!book) return res.status(404).send({ message: "বইটি পাওয়া যায়নি" });
+  if (book.userEmail !== req.user.email)
+    return res.status(403).send({ message: "অনুমতি নেই" });
+
+  const data = { ...req.body };
+  delete data._id;
+  delete data.userEmail;
+  delete data.createdAt;
+
+  if (data.totalCopies !== undefined) {
+    const borrowed = book.totalCopies - book.availableCopies;
+    data.totalCopies = Number(data.totalCopies);
+    data.availableCopies = Math.max(data.totalCopies - borrowed, 0);
   }
-});
+  res.send(await books.updateOne({ _id }, { $set: data }));
+}));
 
-// Shob book
-app.get("/books", async (req, res) => {
-  try {
-    const result = await booksCollection
-      .find()
-      .sort({ createdAt: -1 })
-      .toArray();
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
+app.delete("/books/:id", verifyToken, wrap(async (req, res) => {
+  const _id = oid(req.params.id);
+  const book = _id && (await books.findOne({ _id }));
+  if (!book) return res.status(404).send({ message: "বইটি পাওয়া যায়নি" });
+  if (book.userEmail !== req.user.email)
+    return res.status(403).send({ message: "অনুমতি নেই" });
+  res.send(await books.deleteOne({ _id }));
+}));
 
-// Featured book (home page er jonno)
-app.get("/featured-books", async (req, res) => {
-  try {
-    const result = await booksCollection
-      .find()
-      .sort({ createdAt: -1 })
-      .limit(6)
-      .toArray();
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
+app.get("/my-books", verifyToken, wrap(async (req, res) => {
+  res.send(
+    await books.find({ userEmail: req.user.email }).sort({ createdAt: -1 }).toArray(),
+  );
+}));
 
-// Ekta book er details
-app.get("/book/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!isValidId(id)) {
-      return res.status(400).send({ msg: "Invalid book id" });
-    }
-    const result = await booksCollection.findOne({ _id: new ObjectId(id) });
-    if (!result) {
-      return res.status(404).send({ msg: "Book not found" });
-    }
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
+/* ---------- Borrow ---------- */
+app.post("/borrows", verifyToken, wrap(async (req, res) => {
+  const { bookId, returnDate } = req.body;
+  const _id = oid(bookId);
+  const book = _id && (await books.findOne({ _id }));
+  if (!book) return res.status(404).send({ message: "বইটি পাওয়া যায়নি" });
+  if (book.availableCopies < 1)
+    return res.status(400).send({ message: "এই বইয়ের কপি এখন নেই" });
 
-// Book update
-app.patch("/book/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!isValidId(id)) {
-      return res.status(400).send({ msg: "Invalid book id" });
-    }
-    const data = { ...req.body };
-    delete data._id; // _id kokhono update kora jay na
-    const result = await booksCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: data },
-    );
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
+  const email = req.user.email;
+  if (await borrows.findOne({ bookId, userEmail: email }))
+    return res.status(400).send({ message: "তুমি এই বইটি আগেই ধার নিয়েছ" });
 
-// Book delete
-app.delete("/book/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!isValidId(id)) {
-      return res.status(400).send({ msg: "Invalid book id" });
-    }
-    const result = await booksCollection.deleteOne({ _id: new ObjectId(id) });
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
+  const result = await borrows.insertOne({
+    bookId,
+    userEmail: email,
+    userName: req.user.name,
+    title: book.title,
+    author: book.author,
+    image: book.image,
+    returnDate: returnDate || null,
+    borrowedAt: new Date(),
+  });
+  await books.updateOne({ _id }, { $inc: { availableCopies: -1 } });
+  res.send(result);
+}));
 
-/* ---------- Borrow (dar nite) ---------- */
+app.get("/my-borrows", verifyToken, wrap(async (req, res) => {
+  res.send(
+    await borrows.find({ userEmail: req.user.email }).sort({ borrowedAt: -1 }).toArray(),
+  );
+}));
 
-// Book dar nao
-app.post("/borrow", verifyToken, async (req, res) => {
-  try {
-    const { bookId, email, returnDate } = req.body;
+app.delete("/borrows/:id", verifyToken, wrap(async (req, res) => {
+  const _id = oid(req.params.id);
+  const borrow = _id && (await borrows.findOne({ _id }));
+  if (!borrow) return res.status(404).send({ message: "রেকর্ড পাওয়া যায়নি" });
+  if (borrow.userEmail !== req.user.email)
+    return res.status(403).send({ message: "অনুমতি নেই" });
 
-    if (!bookId || !email) {
-      return res.status(400).send({ msg: "bookId and email are required" });
-    }
-    if (!isValidId(bookId)) {
-      return res.status(400).send({ msg: "Invalid book id" });
-    }
+  const result = await borrows.deleteOne({ _id });
+  const bookId = oid(borrow.bookId);
+  if (bookId) await books.updateOne({ _id: bookId }, { $inc: { availableCopies: 1 } });
+  res.send(result);
+}));
 
-    const book = await booksCollection.findOne({ _id: new ObjectId(bookId) });
-    if (!book) {
-      return res.status(404).send({ msg: "Book not found" });
-    }
-    if ((book.quantity ?? 0) < 1) {
-      return res.status(400).send({ msg: "Book is not available now" });
-    }
-
-    // Ek user ek-i book duibar dar nite parbe na
-    const alreadyBorrowed = await borrowCollection.findOne({
-      bookId,
-      email,
-    });
-    if (alreadyBorrowed) {
-      return res.status(400).send({ msg: "You already borrowed this book" });
-    }
-
-    const result = await borrowCollection.insertOne({
-      bookId,
-      email,
-      title: book.title,
-      author: book.author,
-      image: book.image || "",
-      returnDate: returnDate || null,
-      borrowedAt: new Date(),
-    });
-
-    // Quantity 1 kome jabe
-    await booksCollection.updateOne(
-      { _id: new ObjectId(bookId) },
-      { $inc: { quantity: -1 } },
-    );
-
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
-
-// Amar borrow kora book gulo
-app.get("/my-borrows/:email", verifyToken, async (req, res) => {
-  try {
-    const { email } = req.params;
-    const result = await borrowCollection
-      .find({ email })
-      .sort({ borrowedAt: -1 })
-      .toArray();
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
-
-// Book ferot dao (borrow delete + quantity abar barano)
-app.delete("/my-borrows/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!isValidId(id)) {
-      return res.status(400).send({ msg: "Invalid borrow id" });
-    }
-
-    const borrow = await borrowCollection.findOne({ _id: new ObjectId(id) });
-    if (!borrow) {
-      return res.status(404).send({ msg: "Borrow record not found" });
-    }
-
-    const result = await borrowCollection.deleteOne({ _id: new ObjectId(id) });
-
-    if (isValidId(borrow.bookId)) {
-      await booksCollection.updateOne(
-        { _id: new ObjectId(borrow.bookId) },
-        { $inc: { quantity: 1 } },
-      );
-    }
-
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ msg: "Server Error!" });
-  }
-});
-
-/* ---------- Health check ---------- */
-app.get("/", (req, res) => {
-  res.send({ message: "Server is running fine!" });
-});
-
-app.listen(PORT, () => {
-  console.log(`Server is running at ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server is running at ${PORT}`));
 
 export default app;
