@@ -31,7 +31,9 @@ const verifyToken = async (req, res, next) => {
     next();
   } catch (error) {
     console.error("JWT error:", error.message);
-    res.status(401).send({ message: "আবার লগইন করো" });
+    res
+      .status(401)
+      .send({ message: `আবার লগইন করো (${error.message})` });
   }
 };
 
@@ -161,6 +163,8 @@ app.delete("/borrows/:id", verifyToken, wrap(async (req, res) => {
   res.send(result);
 }));
 
+
+app.get("/", (req, res) => res.send({ message: "Server is running fine!" }));
 app.listen(PORT, () => console.log(`Server is running at ${PORT}`));
 
 export default app;
