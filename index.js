@@ -31,13 +31,11 @@ const verifyToken = async (req, res, next) => {
     next();
   } catch (error) {
     console.error("JWT error:", error.message);
-    res
-      .status(401)
-      .send({ message: `আবার লগইন করো (${error.message})` });
+    res.status(401).send({ message: "আবার লগইন করো" });
   }
 };
 
-// সব রুটের এরর এক জায়গায় সামলায়
+// all error's handeling
 const wrap = (fn) => (req, res) =>
   fn(req, res).catch((e) => {
     console.error(e);
@@ -127,37 +125,46 @@ app.post("/borrows", verifyToken, wrap(async (req, res) => {
     return res.status(400).send({ message: "এই বইয়ের কপি এখন নেই" });
 
   const email = req.user.email;
-  if (await borrows.findOne({ bookId, userEmail: email }))
+  const active = await borrows.findOne({ bookId, userEmail: email, returned: false });
+  if (active)
     return res.status(400).send({ message: "তুমি এই বইটি আগেই ধার নিয়েছ" });
 
   const result = await borrows.insertOne({
     bookId,
+    bookTitle: book.title,
+    bookImage: book.image,
     userEmail: email,
     userName: req.user.name,
-    title: book.title,
-    author: book.author,
-    image: book.image,
-    returnDate: returnDate || null,
-    borrowedAt: new Date(),
+    borrowDate: new Date(),
+    returnDate,
+    returned: false,
+    returnedAt: null,
   });
   await books.updateOne({ _id }, { $inc: { availableCopies: -1 } });
   res.send(result);
 }));
 
-app.get("/my-borrows", verifyToken, wrap(async (req, res) => {
+// after return borrowed
+app.get("/borrows", verifyToken, wrap(async (req, res) => {
   res.send(
-    await borrows.find({ userEmail: req.user.email }).sort({ borrowedAt: -1 }).toArray(),
+    await borrows.find({ userEmail: req.user.email }).sort({ borrowDate: -1 }).toArray(),
   );
 }));
 
+// recoerd all read books
 app.delete("/borrows/:id", verifyToken, wrap(async (req, res) => {
   const _id = oid(req.params.id);
   const borrow = _id && (await borrows.findOne({ _id }));
   if (!borrow) return res.status(404).send({ message: "রেকর্ড পাওয়া যায়নি" });
   if (borrow.userEmail !== req.user.email)
     return res.status(403).send({ message: "অনুমতি নেই" });
+  if (borrow.returned)
+    return res.status(400).send({ message: "বইটি আগেই ফেরত দেওয়া হয়েছে" });
 
-  const result = await borrows.deleteOne({ _id });
+  const result = await borrows.updateOne(
+    { _id },
+    { $set: { returned: true, returnedAt: new Date() } },
+  );
   const bookId = oid(borrow.bookId);
   if (bookId) await books.updateOne({ _id: bookId }, { $inc: { availableCopies: 1 } });
   res.send(result);
@@ -165,6 +172,7 @@ app.delete("/borrows/:id", verifyToken, wrap(async (req, res) => {
 
 
 app.get("/", (req, res) => res.send({ message: "Server is running fine!" }));
+
 app.listen(PORT, () => console.log(`Server is running at ${PORT}`));
 
 export default app;
