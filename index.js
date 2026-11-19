@@ -144,14 +144,14 @@ app.post("/borrows", verifyToken, wrap(async (req, res) => {
   res.send(result);
 }));
 
-// after return borrowed
+// my borrowed books list
 app.get("/borrows", verifyToken, wrap(async (req, res) => {
   res.send(
     await borrows.find({ userEmail: req.user.email }).sort({ borrowDate: -1 }).toArray(),
   );
 }));
 
-// recoerd all read books
+// return a borrowed book
 app.delete("/borrows/:id", verifyToken, wrap(async (req, res) => {
   const _id = oid(req.params.id);
   const borrow = _id && (await borrows.findOne({ _id }));
